@@ -91,6 +91,16 @@ def _build_tier(parent_group, num_arms, radius, y, style, tier_scale=1.0):
     r = radius * tier_scale
     parts = []
 
+    if style == "round":
+        # Round support ring: torus so dishes/candles stand on something,
+        # matching the square style's cube-beam frame.
+        ring = _make_part(
+            cmds.polyTorus, r=r, sr=0.12 * tier_scale, name="ring_tmp"
+        )
+        cmds.move(0, y, 0, ring)
+        cmds.parent(ring, parent_group)
+        parts.append(ring)
+
     if style == "square":
         # Square frame: 4 thin cubes forming a square of side r
         side = r * 1.4
