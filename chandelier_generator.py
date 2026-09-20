@@ -206,7 +206,7 @@ def _build_center_fill(parent_group, outer_r, y, style, tier_scale, count,
     on it, raised slightly so the middle reads as a second layer.
     height_off: vertical lift above the tier. spread: inner radius
     as a fraction of outer radius (controls spacing between lights).
-    Metal: ring/arms/dishes. Trim: candle bodies. Light: bulbs only.
+    Metal: ring/arms/dishes. Light: candles + bulbs. Trim unused here.
     Returns list of all nodes.
     """
     if metal_nodes is None:
@@ -289,7 +289,7 @@ def _build_center_fill(parent_group, outer_r, y, style, tier_scale, count,
         )
         cmds.move(x, inner_y + 0.4, z, candle)
         cmds.parent(candle, parent_group)
-        _keep(candle, "trim")
+        _keep(candle, "light")
 
         bulb = _make_part(
             cmds.polySphere, r=0.15 * s + 0.03, sx=10, sy=8, name="centerBulb_tmp"
@@ -407,16 +407,16 @@ def _build_tier(
         cmds.parent(dish, parent_group)
         _keep(dish, "metal")
 
-        # Candle stick: thin tall cylinder (shorter for fillers) (trim, not light)
+        # Candle stick: thin tall cylinder (shorter for fillers) (light)
         candle_h = 0.9 if is_main else 0.6
         candle = _make_part(
             cmds.polyCylinder, r=0.12 * s, h=candle_h, sz=8, name="candle_tmp"
         )
         cmds.move(x, y + 0.1 + candle_h / 2.0, z, candle)
         cmds.parent(candle, parent_group)
-        _keep(candle, "trim")
+        _keep(candle, "light")
 
-        # Bulb / flame: sphere (light only - the top)
+        # Bulb / flame: sphere (light - the top)
         bulb = _make_part(
             cmds.polySphere, r=0.18 * s, sx=10, sy=8, name="bulb_tmp"
         )
@@ -448,8 +448,8 @@ def build_chandelier(
         Larger spreads lights further apart.
     support_color / metal_color: RGB 0..1 for arms/rings/dishes (metal).
     trim_color: RGB 0..1 for non-metal hardware: ceiling mount, stem,
-        collars, finial, candle bodies.
-    light_color: RGB 0..1 for bulb tops only (spheres).
+        collars, finial.
+    light_color: RGB 0..1 for all lights: candles + bulbs.
     brightness: 0..3 incandescence multiplier for the light parts.
 
     Returns the group name.
