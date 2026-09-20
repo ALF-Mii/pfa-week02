@@ -34,7 +34,7 @@ def _require_maya():
         raise RuntimeError("This script must run inside Maya (maya.cmds not found).")
 
 
-def _sanitize_inputs(num_arms, radius, height, tiers, style):
+def _sanitize_inputs(num_arms, radius, height, tiers, style, extra_lights=0):
     """Handle inputs you didn't plan for - on purpose."""
     # num_arms: int 3..12
     try:
@@ -57,18 +57,25 @@ def _sanitize_inputs(num_arms, radius, height, tiers, style):
     if not (1.0 <= height <= 30.0):
         height = 8.0
 
-    # tiers: 1 or 2 only
+    # tiers: 1..5 (was 1-2, now N layers)
     try:
         tiers = int(tiers)
     except (TypeError, ValueError):
         tiers = 1
-    tiers = 2 if tiers >= 2 else 1
+    tiers = max(1, min(5, tiers))
 
     # style: 'round' or 'square', default round
     if style not in ("round", "square"):
         style = "round"
 
-    return num_arms, radius, height, tiers, style
+    # extra_lights: 0..3 filler lights between each pair of main arms
+    try:
+        extra_lights = int(extra_lights)
+    except (TypeError, ValueError):
+        extra_lights = 0
+    extra_lights = max(0, min(3, extra_lights))
+
+    return num_arms, radius, height, tiers, style, extra_lights
 
 
 def _unique_name(style):
@@ -86,8 +93,30 @@ def _make_part(make_fn, *args, **kwargs):
     return nodes
 
 
-def _build_tier(parent_group, num_arms, radius, y, style, tier_scale=1.0):
-    """Build one tier of arms. Returns list of nodes (already parented)."""
+def _fixture_position(style, k, total, r):
+    """Position k-th fixture of total around the support. Returns (x, z, rot_y)."""
+    if style == "round":
+        angle = (2.0 * math.pi * k) / total
+        return math.cos(angle) * r, math.sin(angle) * r, -math.degrees(angle)
+    # Square: distribute evenly around the square perimeter
+    t = float(k) / total * 4.0  # 0..4
+    side_idx = int(t) % 4
+    frac = (t % 1.0) - 0.5  # -0.5..0.5 along side
+    side = r * 1.4
+    if side_idx == 0:
+        return frac * side, side / 2, 0
+    elif side_idx == 1:
+        return frac * side, -side / 2, 0
+    elif side_idx == 2:
+        return side / 2, frac * side, 90
+    else:
+        return -side / 2, frac * side, 90
+
+
+def _build_tier(
+    parent_group, num_arms, radius, y, style, tier_scale=1.0, extra_lights=0
+):
+    """Build one tier of arms + filler lights standing on the support."""
     r = radius * tier_scale
     parts = []
 
@@ -120,92 +149,92 @@ def _build_tier(parent_group, num_arms, radius, y, style, tier_scale=1.0):
             cmds.parent(beam, parent_group)
             parts.append(beam)
 
-    for i in range(num_arms):
-        if style == "round":
-            angle = (2.0 * math.pi * i) / num_arms
-            x = math.cos(angle) * r
-            z = math.sin(angle) * r
-            rot_y = -math.degrees(angle)
-        else:
-            # Square: distribute arms evenly around the square perimeter
-            t = float(i) / num_arms * 4.0  # 0..4
-            side_idx = int(t) % 4
-            frac = (t % 1.0) - 0.5  # -0.5..0.5 along side
-            side = r * 1.4
-            if side_idx == 0:
-                x, z, rot_y = frac * side, side / 2, 0
-            elif side_idx == 1:
-                x, z, rot_y = frac * side, -side / 2, 0
-            elif side_idx == 2:
-                x, z, rot_y = side / 2, frac * side, 90
-            else:
-                x, z, rot_y = -side / 2, frac * side, 90
+    # Main arms + filler lights share the same support positions.
+    # e.g. num_arms=6, extra_lights=1 -> 12 positions, every 2nd is a main arm.
+    step = extra_lights + 1
+    total = num_arms * step
+    for k in range(total):
+        is_main = (k % step == 0)
+        x, z, rot_y = _fixture_position(style, k, total, r)
 
-        # Horizontal arm: thin cylinder from center to (x, z)
-        arm_len = math.sqrt(x * x + z * z)
-        arm = _make_part(
-            cmds.polyCylinder,
-            r=0.08 * tier_scale,
-            h=arm_len,
-            sz=8,
-            name="arm_tmp",
-        )
-        # Cylinder axis is Y; rotate to lie flat pointing outward
-        cmds.rotate(0, 0, 90, arm)
-        cmds.rotate(0, rot_y, 0, arm)
-        cmds.move(x / 2.0, y, z / 2.0, arm)
-        cmds.parent(arm, parent_group)
-        parts.append(arm)
+        if is_main:
+            # Horizontal arm: thin cylinder from center to (x, z)
+            arm_len = math.sqrt(x * x + z * z)
+            arm = _make_part(
+                cmds.polyCylinder,
+                r=0.08 * tier_scale,
+                h=arm_len,
+                sz=8,
+                name="arm_tmp",
+            )
+            # Cylinder axis is Y; rotate to lie flat pointing outward
+            cmds.rotate(0, 0, 90, arm)
+            cmds.rotate(0, rot_y, 0, arm)
+            cmds.move(x / 2.0, y, z / 2.0, arm)
+            cmds.parent(arm, parent_group)
+            parts.append(arm)
+            s = tier_scale
+        else:
+            # Filler light: no arm, stands directly on the ring/frame.
+            s = tier_scale * 0.8
 
         # Candle holder dish: short wide cylinder
         dish = _make_part(
-            cmds.polyCylinder, r=0.28 * tier_scale, h=0.08, sz=12, name="dish_tmp"
+            cmds.polyCylinder, r=0.28 * s, h=0.08, sz=12, name="dish_tmp"
         )
         cmds.move(x, y + 0.1, z, dish)
         cmds.parent(dish, parent_group)
         parts.append(dish)
 
-        # Candle stick: thin tall cylinder
+        # Candle stick: thin tall cylinder (shorter for fillers)
+        candle_h = 0.9 if is_main else 0.6
         candle = _make_part(
-            cmds.polyCylinder, r=0.12 * tier_scale, h=0.9, sz=8, name="candle_tmp"
+            cmds.polyCylinder, r=0.12 * s, h=candle_h, sz=8, name="candle_tmp"
         )
-        cmds.move(x, y + 0.55, z, candle)
+        cmds.move(x, y + 0.1 + candle_h / 2.0, z, candle)
         cmds.parent(candle, parent_group)
         parts.append(candle)
 
         # Bulb / flame: sphere
         bulb = _make_part(
-            cmds.polySphere, r=0.18 * tier_scale, sx=10, sy=8, name="bulb_tmp"
+            cmds.polySphere, r=0.18 * s, sx=10, sy=8, name="bulb_tmp"
         )
-        cmds.move(x, y + 1.15, z, bulb)
+        cmds.move(x, y + 0.1 + candle_h + 0.18 * s, z, bulb)
         cmds.parent(bulb, parent_group)
         parts.append(bulb)
 
-        # Joint cube: small decorative cube where arm meets ring
-        joint = _make_part(
-            cmds.polyCube,
-            w=0.22 * tier_scale,
-            h=0.22 * tier_scale,
-            d=0.22 * tier_scale,
-            name="joint_tmp",
-        )
-        cmds.move(x * 0.55, y, z * 0.55, joint)
-        cmds.parent(joint, parent_group)
-        parts.append(joint)
+        if is_main:
+            # Joint cube: small decorative cube where arm meets ring
+            joint = _make_part(
+                cmds.polyCube,
+                w=0.22 * tier_scale,
+                h=0.22 * tier_scale,
+                d=0.22 * tier_scale,
+                name="joint_tmp",
+            )
+            cmds.move(x * 0.55, y, z * 0.55, joint)
+            cmds.parent(joint, parent_group)
+            parts.append(joint)
 
     return parts
 
 
-def build_chandelier(num_arms=6, radius=5.0, height=8.0, tiers=1, style="round"):
+def build_chandelier(
+    num_arms=6, radius=5.0, height=8.0, tiers=1, style="round", extra_lights=0
+):
     """
     Build a chandelier from primitives. All geometry is parented under
     one group so delete is safe. Undo is one chunk.
 
+    tiers: 1..5 layers, stacked bottom (large) to top (small).
+    extra_lights: 0..3 filler candles between each pair of main arms,
+        standing directly on the torus ring / square frame.
+
     Returns the group name.
     """
     _require_maya()
-    num_arms, radius, height, tiers, style = _sanitize_inputs(
-        num_arms, radius, height, tiers, style
+    num_arms, radius, height, tiers, style, extra_lights = _sanitize_inputs(
+        num_arms, radius, height, tiers, style, extra_lights
     )
 
     group_name = _unique_name(style)
@@ -235,14 +264,30 @@ def build_chandelier(num_arms=6, radius=5.0, height=8.0, tiers=1, style="round")
             cmds.move(0, sy + sr + 0.1, 0, collar)
             cmds.parent(collar, grp)
 
-        # Tier(s)
-        _build_tier(grp, num_arms, radius, height * 0.45, style, tier_scale=1.0)
-        if tiers == 2:
-            _build_tier(grp, num_arms, radius, height * 0.65, style, tier_scale=0.65)
+        # Tier(s): bottom = large, top = small. Legacy 1-2 tier
+        # heights preserved; N>2 spreads evenly 0.35 -> 0.70.
+        if tiers == 1:
+            tier_specs = [(height * 0.45, 1.0)]
+        elif tiers == 2:
+            tier_specs = [
+                (height * 0.45, 1.0),
+                (height * 0.65, 0.65),
+            ]
+        else:
+            tier_specs = []
+            for j in range(tiers):
+                t = j / float(tiers - 1)  # 0 bottom -> 1 top
+                tier_specs.append(
+                    (height * (0.35 + 0.35 * t), 1.0 - 0.35 * t)
+                )
+        for ty, ts in tier_specs:
+            _build_tier(grp, num_arms, radius, ty, style, tier_scale=ts,
+                        extra_lights=extra_lights)
 
-        # Bottom finial: sphere
+        # Bottom finial: sphere under lowest tier
+        finial_y = tier_specs[0][0] - 0.8
         finial = _make_part(cmds.polySphere, r=0.4, sx=12, sy=8, name="finial_tmp")
-        cmds.move(0, height * 0.45 - 0.8, 0, finial)
+        cmds.move(0, finial_y, 0, finial)
         cmds.parent(finial, grp)
 
         CREATED_GROUPS.append(grp)
@@ -289,7 +334,10 @@ def show_ui():
     cmds.floatSliderGrp(
         "heightSlider", label="Height", min=2.0, max=20.0, value=8.0, field=True
     )
-    cmds.intSliderGrp("tiersSlider", label="Tiers", min=1, max=2, value=1, field=True)
+    cmds.intSliderGrp("tiersSlider", label="Tiers", min=1, max=5, value=1, field=True)
+    cmds.intSliderGrp(
+        "extraSlider", label="Extra lights", min=0, max=3, value=0, field=True
+    )
     cmds.optionMenuGrp("styleMenu", label="Style")
     cmds.menuItem(label="round")
     cmds.menuItem(label="square")
@@ -301,6 +349,7 @@ def show_ui():
             cmds.floatSliderGrp("heightSlider", q=True, value=True),
             cmds.intSliderGrp("tiersSlider", q=True, value=True),
             cmds.optionMenuGrp("styleMenu", q=True, value=True),
+            cmds.intSliderGrp("extraSlider", q=True, value=True),
         ),
     )
     cmds.button(label="Undo Last (Delete)", command=lambda *_: delete_last_chandelier())
