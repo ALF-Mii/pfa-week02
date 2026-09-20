@@ -175,6 +175,31 @@ def _assign_material(node, shading_group):
                                                              exc))
 
 
+def _assign_batch(nodes, material):
+    """Assign many transforms to a material at once via hyperShade.
+
+    Per-node cmds.sets in a loop proved flaky (only one light kept the
+    material), so shading now goes through one hyperShade call per bucket.
+    Restores the user's selection afterwards. Returns assigned count.
+    """
+    live = [n for n in nodes if cmds.objExists(n)]
+    if not live:
+        return 0
+    prev = cmds.ls(selection=True) or []
+    try:
+        cmds.select(live, replace=True)
+        cmds.hyperShade(assign=material)
+    finally:
+        if prev:
+            try:
+                cmds.select(prev, replace=True)
+            except (RuntimeError, ValueError):
+                cmds.select(clear=True)
+        else:
+            cmds.select(clear=True)
+    return len(live)
+
+
 def _fixture_position(style, k, total, r):
     """Position k-th fixture of total around the support. Returns (x, z, rot_y)."""
     if style == "round":
@@ -534,6 +559,7 @@ def build_chandelier(
         trim_nodes.append(finial)
 
         # Three materials: metal + trim + light-with-brightness.
+        # Batch hyperShade assign per bucket (looped sets only kept one).
         glow = (light_color[0] * brightness,
                 light_color[1] * brightness,
                 light_color[2] * brightness)
@@ -545,12 +571,13 @@ def build_chandelier(
             grp + "_lightMat", light_color, glow)
         _GROUP_SHADERS[grp] = [metal_mat, metal_sg, trim_mat, trim_sg,
                                light_mat, light_sg]
-        for n in metal_nodes:
-            _assign_material(n, metal_sg)
-        for n in trim_nodes:
-            _assign_material(n, trim_sg)
-        for n in light_nodes:
-            _assign_material(n, light_sg)
+        n_metal = _assign_batch(metal_nodes, metal_mat)
+        n_trim = _assign_batch(trim_nodes, trim_mat)
+        n_light = _assign_batch(light_nodes, light_mat)
+        if n_light != len(light_nodes):
+            cmds.warning(
+                "Light assign: {} of {} got {}".format(
+                    n_light, len(light_nodes), light_mat))
 
         CREATED_GROUPS.append(grp)
         return grp
