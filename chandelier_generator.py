@@ -253,17 +253,9 @@ def build_chandelier(
         cmds.move(0, height / 2.0, 0, stem)
         cmds.parent(stem, grp)
 
-        # Central column decoration: stacked spheres + short cylinders
-        for j, (sy, sr) in enumerate([(height * 0.55, 0.5), (height * 0.35, 0.35)]):
-            ball = _make_part(cmds.polySphere, r=sr, sx=14, sy=10, name="core_tmp")
-            cmds.move(0, sy, 0, ball)
-            cmds.parent(ball, grp)
-            collar = _make_part(
-                cmds.polyCylinder, r=sr * 0.5, h=0.25, sz=12, name="collar_tmp"
-            )
-            cmds.move(0, sy + sr + 0.1, 0, collar)
-            cmds.parent(collar, grp)
-
+        # Middle stays open for layers: slim stem only, plus a small
+        # collar cylinder where each tier meets the stem. No large
+        # central spheres blocking the stack.
         # Tier(s): bottom = large, top = small. Legacy 1-2 tier
         # heights preserved; N>2 spreads evenly 0.35 -> 0.70.
         if tiers == 1:
@@ -280,6 +272,17 @@ def build_chandelier(
                 tier_specs.append(
                     (height * (0.35 + 0.35 * t), 1.0 - 0.35 * t)
                 )
+        for ty, ts in tier_specs:
+            collar = _make_part(
+                cmds.polyCylinder,
+                r=0.25 * ts + 0.05,
+                h=0.2,
+                sz=12,
+                name="collar_tmp",
+            )
+            cmds.move(0, ty, 0, collar)
+            cmds.parent(collar, grp)
+
         for ty, ts in tier_specs:
             _build_tier(grp, num_arms, radius, ty, style, tier_scale=ts,
                         extra_lights=extra_lights)
