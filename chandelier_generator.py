@@ -25,6 +25,8 @@ except ImportError:
 
 # Registry of groups THIS tool created (for safe delete)
 CREATED_GROUPS = []
+# group name -> [supportMat, supportSG, lightMat, lightSG] (also only ours)
+_GROUP_SHADERS = {}
 _CHANDELIER_PREFIX = "chandelier_"
 _counter = 0
 
@@ -35,7 +37,9 @@ def _require_maya():
 
 
 def _sanitize_inputs(num_arms, radius, height, tiers, style, extra_lights=0,
-                     center_lights=6, center_height=0.35, center_spread=0.45):
+                     center_lights=6, center_height=0.35, center_spread=0.45,
+                     support_color=(0.25, 0.25, 0.28),
+                     light_color=(1.0, 0.9, 0.7), brightness=1.0):
     """Handle inputs you didn't plan for - on purpose."""
     # num_arms: int 3..12
     try:
@@ -99,8 +103,19 @@ def _sanitize_inputs(num_arms, radius, height, tiers, style, extra_lights=0,
         center_spread = 0.45
     center_spread = max(0.2, min(0.8, center_spread))
 
+    support_color = _sanitize_color(support_color, (0.25, 0.25, 0.28))
+    light_color = _sanitize_color(light_color, (1.0, 0.9, 0.7))
+
+    # brightness: 0..3 incandescence multiplier for the light parts
+    try:
+        brightness = float(brightness)
+    except (TypeError, ValueError):
+        brightness = 1.0
+    brightness = max(0.0, min(3.0, brightness))
+
     return (num_arms, radius, height, tiers, style, extra_lights, center_lights,
-            center_height, center_spread)
+            center_height, center_spread, support_color, light_color,
+            brightness)
 
 
 def _unique_name(style):
@@ -116,6 +131,38 @@ def _make_part(make_fn, *args, **kwargs):
     if isinstance(nodes, (list, tuple)):
         return nodes[0]
     return nodes
+
+
+def _sanitize_color(value, default):
+    """Clamp an RGB input to 3 floats in 0..1. Bad input -> default."""
+    try:
+        r, g, b = float(value[0]), float(value[1]), float(value[2])
+        return (max(0.0, min(1.0, r)),
+                max(0.0, min(1.0, g)),
+                max(0.0, min(1.0, b)))
+    except (TypeError, ValueError, IndexError):
+        return default
+
+
+def _make_lambert(base_name, color, incandescence=(0.0, 0.0, 0.0)):
+    """Create a lambert + shading group. Returns (mat, shadingGroup)."""
+    mat = cmds.shadingNode("lambert", asShader=True, name=base_name)
+    sg = cmds.sets(renderable=True, noSurfaceShader=True, empty=True,
+                   name=base_name + "SG")
+    cmds.connectAttr(mat + ".outColor", sg + ".surfaceShader", force=True)
+    cmds.setAttr(mat + ".color", color[0], color[1], color[2], type="double3")
+    cmds.setAttr(mat + ".incandescence",
+                 incandescence[0], incandescence[1], incandescence[2],
+                 type="double3")
+    return mat, sg
+
+
+def _assign_material(node, shading_group):
+    """Assign a node to a shading group. Never fails the build."""
+    try:
+        cmds.sets(node, e=True, forceElement=shading_group)
+    except (RuntimeError, ValueError):
+        pass
 
 
 def _fixture_position(style, k, total, r):
@@ -139,7 +186,8 @@ def _fixture_position(style, k, total, r):
 
 
 def _build_center_fill(parent_group, outer_r, y, style, tier_scale, count,
-                       height_off=0.35, spread=0.45):
+                       height_off=0.35, spread=0.45,
+                       support_nodes=None, light_nodes=None):
     """Inner ring of lights around the stem - the 'full middle'.
 
     Each tier gets a small concentric support ring (torus for round,
@@ -147,8 +195,13 @@ def _build_center_fill(parent_group, outer_r, y, style, tier_scale, count,
     on it, raised slightly so the middle reads as a second layer.
     height_off: vertical lift above the tier. spread: inner radius
     as a fraction of outer radius (controls spacing between lights).
-    Returns list of nodes.
+    Appends to support_nodes (ring/arms/dishes) and light_nodes
+    (candles/bulbs). Returns list of all nodes.
     """
+    if support_nodes is None:
+        support_nodes = []
+    if light_nodes is None:
+        light_nodes = []
     if count <= 0 or outer_r < 0.6:
         return []
     inner_r = outer_r * spread
@@ -156,13 +209,18 @@ def _build_center_fill(parent_group, outer_r, y, style, tier_scale, count,
     s = tier_scale * 0.7
     parts = []
 
+    def _keep(node, is_light):
+        parts.append(node)
+        (light_nodes if is_light else support_nodes).append(node)
+        return node
+
     if style == "round":
         ring = _make_part(
             cmds.polyTorus, r=inner_r, sr=0.08 * tier_scale, name="centerRing_tmp"
         )
         cmds.move(0, inner_y, 0, ring)
         cmds.parent(ring, parent_group)
-        parts.append(ring)
+        _keep(ring, False)
     else:
         side = inner_r * 1.4
         beam_h = 0.12
@@ -179,7 +237,7 @@ def _build_center_fill(parent_group, outer_r, y, style, tier_scale, count,
             if rot_y:
                 cmds.rotate(0, rot_y, 0, beam)
             cmds.parent(beam, parent_group)
-            parts.append(beam)
+            _keep(beam, False)
 
     for k in range(count):
         x, z, rot_y = _fixture_position(style, k, count, inner_r)
@@ -198,39 +256,49 @@ def _build_center_fill(parent_group, outer_r, y, style, tier_scale, count,
             cmds.rotate(0, rot_y, 0, arm)
             cmds.move(x / 2.0, inner_y, z / 2.0, arm)
             cmds.parent(arm, parent_group)
-            parts.append(arm)
+            _keep(arm, False)
 
         dish = _make_part(
             cmds.polyCylinder, r=0.22 * s + 0.05, h=0.08, sz=10, name="centerDish_tmp"
         )
         cmds.move(x, inner_y + 0.1, z, dish)
         cmds.parent(dish, parent_group)
-        parts.append(dish)
+        _keep(dish, False)
 
         candle = _make_part(
             cmds.polyCylinder, r=0.10 * s + 0.02, h=0.6, sz=8, name="centerCandle_tmp"
         )
         cmds.move(x, inner_y + 0.4, z, candle)
         cmds.parent(candle, parent_group)
-        parts.append(candle)
+        _keep(candle, True)
 
         bulb = _make_part(
             cmds.polySphere, r=0.15 * s + 0.03, sx=10, sy=8, name="centerBulb_tmp"
         )
         cmds.move(x, inner_y + 0.85, z, bulb)
         cmds.parent(bulb, parent_group)
-        parts.append(bulb)
+        _keep(bulb, True)
 
     return parts
 
 
 def _build_tier(
     parent_group, num_arms, radius, y, style, tier_scale=1.0, extra_lights=0,
-    center_lights=0, center_height=0.35, center_spread=0.45
+    center_lights=0, center_height=0.35, center_spread=0.45,
+    support_nodes=None, light_nodes=None
 ):
     """Build one tier: outer arms + inner 'full middle' ring."""
+    if support_nodes is None:
+        support_nodes = []
+    if light_nodes is None:
+        light_nodes = []
     r = radius * tier_scale
     parts = []
+
+    def _keep(node, is_light):
+        parts.append(node)
+        (light_nodes if is_light else support_nodes).append(node)
+        return node
 
     if style == "round":
         # Round support ring: torus so dishes/candles stand on something,
@@ -240,7 +308,7 @@ def _build_tier(
         )
         cmds.move(0, y, 0, ring)
         cmds.parent(ring, parent_group)
-        parts.append(ring)
+        _keep(ring, False)
 
     if style == "square":
         # Square frame: 4 thin cubes forming a square of side r
@@ -259,12 +327,14 @@ def _build_tier(
             if rot_y:
                 cmds.rotate(0, rot_y, 0, beam)
             cmds.parent(beam, parent_group)
-            parts.append(beam)
+            _keep(beam, False)
 
     # Middle fullness: inner concentric ring around the stem.
     parts.extend(
         _build_center_fill(parent_group, r, y, style, tier_scale, center_lights,
-                           height_off=center_height, spread=center_spread)
+                           height_off=center_height, spread=center_spread,
+                           support_nodes=support_nodes,
+                           light_nodes=light_nodes)
     )
 
     # Main arms + filler lights share the same support positions.
@@ -290,43 +360,45 @@ def _build_tier(
             cmds.rotate(0, rot_y, 0, arm)
             cmds.move(x / 2.0, y, z / 2.0, arm)
             cmds.parent(arm, parent_group)
-            parts.append(arm)
+            _keep(arm, False)
             s = tier_scale
         else:
             # Filler light: no arm, stands directly on the ring/frame.
             s = tier_scale * 0.8
 
-        # Candle holder dish: short wide cylinder
+        # Candle holder dish: short wide cylinder (support)
         dish = _make_part(
             cmds.polyCylinder, r=0.28 * s, h=0.08, sz=12, name="dish_tmp"
         )
         cmds.move(x, y + 0.1, z, dish)
         cmds.parent(dish, parent_group)
-        parts.append(dish)
+        _keep(dish, False)
 
-        # Candle stick: thin tall cylinder (shorter for fillers)
+        # Candle stick: thin tall cylinder (shorter for fillers) (light)
         candle_h = 0.9 if is_main else 0.6
         candle = _make_part(
             cmds.polyCylinder, r=0.12 * s, h=candle_h, sz=8, name="candle_tmp"
         )
         cmds.move(x, y + 0.1 + candle_h / 2.0, z, candle)
         cmds.parent(candle, parent_group)
-        parts.append(candle)
+        _keep(candle, True)
 
-        # Bulb / flame: sphere
+        # Bulb / flame: sphere (light)
         bulb = _make_part(
             cmds.polySphere, r=0.18 * s, sx=10, sy=8, name="bulb_tmp"
         )
         cmds.move(x, y + 0.1 + candle_h + 0.18 * s, z, bulb)
         cmds.parent(bulb, parent_group)
-        parts.append(bulb)
+        _keep(bulb, True)
 
     return parts
 
 
 def build_chandelier(
     num_arms=6, radius=5.0, height=8.0, tiers=1, style="round", extra_lights=0,
-    center_lights=6, center_height=0.35, center_spread=0.45
+    center_lights=6, center_height=0.35, center_spread=0.45,
+    support_color=(0.25, 0.25, 0.28), light_color=(1.0, 0.9, 0.7),
+    brightness=1.0
 ):
     """
     Build a chandelier from primitives. All geometry is parented under
@@ -341,14 +413,18 @@ def build_chandelier(
         Negative drops it below for a lower center layer.
     center_spread: 0.2..0.8 inner radius as fraction of outer radius.
         Larger spreads lights further apart.
+    support_color: RGB 0..1 for arms/rings/stem/mount/dishes.
+    light_color: RGB 0..1 for candles/bulbs.
+    brightness: 0..3 incandescence multiplier for the light parts.
 
     Returns the group name.
     """
     _require_maya()
     (num_arms, radius, height, tiers, style, extra_lights, center_lights,
-     center_height, center_spread) = _sanitize_inputs(
+     center_height, center_spread, support_color, light_color,
+     brightness) = _sanitize_inputs(
         num_arms, radius, height, tiers, style, extra_lights, center_lights,
-        center_height, center_spread
+        center_height, center_spread, support_color, light_color, brightness
     )
 
     group_name = _unique_name(style)
@@ -356,16 +432,20 @@ def build_chandelier(
     cmds.undoInfo(openChunk=True)
     try:
         grp = cmds.group(empty=True, name=group_name)
+        support_nodes = []
+        light_nodes = []
 
-        # Ceiling mount: flat cylinder at top
+        # Ceiling mount: flat cylinder at top (support)
         mount = _make_part(cmds.polyCylinder, r=0.6, h=0.3, sz=16, name="mount_tmp")
         cmds.move(0, height, 0, mount)
         cmds.parent(mount, grp)
+        support_nodes.append(mount)
 
-        # Stem: long thin cylinder
+        # Stem: long thin cylinder (support)
         stem = _make_part(cmds.polyCylinder, r=0.12, h=height, sz=10, name="stem_tmp")
         cmds.move(0, height / 2.0, 0, stem)
         cmds.parent(stem, grp)
+        support_nodes.append(stem)
 
         # Middle stays open for layers: slim stem only, plus a small
         # collar cylinder where each tier meets the stem. No large
@@ -396,18 +476,36 @@ def build_chandelier(
             )
             cmds.move(0, ty, 0, collar)
             cmds.parent(collar, grp)
+            support_nodes.append(collar)
 
         for ty, ts in tier_specs:
             _build_tier(grp, num_arms, radius, ty, style, tier_scale=ts,
                         extra_lights=extra_lights, center_lights=center_lights,
                         center_height=center_height,
-                        center_spread=center_spread)
+                        center_spread=center_spread,
+                        support_nodes=support_nodes,
+                        light_nodes=light_nodes)
 
-        # Bottom finial: sphere under lowest tier
+        # Bottom finial: sphere under lowest tier (support)
         finial_y = tier_specs[0][0] - 0.8
         finial = _make_part(cmds.polySphere, r=0.4, sx=12, sy=8, name="finial_tmp")
         cmds.move(0, finial_y, 0, finial)
         cmds.parent(finial, grp)
+        support_nodes.append(finial)
+
+        # Two materials: support color + light color with brightness glow.
+        glow = (light_color[0] * brightness,
+                light_color[1] * brightness,
+                light_color[2] * brightness)
+        support_mat, support_sg = _make_lambert(
+            grp + "_supportMat", support_color, (0.0, 0.0, 0.0))
+        light_mat, light_sg = _make_lambert(
+            grp + "_lightMat", light_color, glow)
+        _GROUP_SHADERS[grp] = [support_mat, support_sg, light_mat, light_sg]
+        for n in support_nodes:
+            _assign_material(n, support_sg)
+        for n in light_nodes:
+            _assign_material(n, light_sg)
 
         CREATED_GROUPS.append(grp)
         return grp
@@ -416,7 +514,7 @@ def build_chandelier(
 
 
 def delete_chandelier(group_name):
-    """Delete ONLY the group this tool made. Never wildcard-delete."""
+    """Delete ONLY the group this tool made + its two materials."""
     _require_maya()
     if group_name not in CREATED_GROUPS:
         # Also allow prefix match only if we created it this session;
@@ -426,6 +524,13 @@ def delete_chandelier(group_name):
         )
     if cmds.objExists(group_name):
         cmds.delete(group_name)
+    # Clean up our own shaders (tracked per group, never wildcard).
+    for node in _GROUP_SHADERS.pop(group_name, []):
+        try:
+            if cmds.objExists(node):
+                cmds.delete(node)
+        except (RuntimeError, ValueError):
+            pass
     CREATED_GROUPS.remove(group_name)
 
 
@@ -468,6 +573,14 @@ def show_ui():
         "centerSpreadSlider", label="Center spread", min=0.2, max=0.8,
         value=0.45, field=True, precision=2
     )
+    cmds.colorSliderGrp("supportColor", label="Support color",
+                        rgb=(0.25, 0.25, 0.28))
+    cmds.colorSliderGrp("lightColor", label="Light color",
+                        rgb=(1.0, 0.9, 0.7))
+    cmds.floatSliderGrp(
+        "brightSlider", label="Brightness", min=0.0, max=3.0,
+        value=1.0, field=True, precision=2
+    )
     cmds.optionMenuGrp("styleMenu", label="Style")
     cmds.menuItem(label="round")
     cmds.menuItem(label="square")
@@ -483,6 +596,9 @@ def show_ui():
             cmds.intSliderGrp("centerSlider", q=True, value=True),
             cmds.floatSliderGrp("centerHeightSlider", q=True, value=True),
             cmds.floatSliderGrp("centerSpreadSlider", q=True, value=True),
+            cmds.colorSliderGrp("supportColor", q=True, rgb=True),
+            cmds.colorSliderGrp("lightColor", q=True, rgb=True),
+            cmds.floatSliderGrp("brightSlider", q=True, value=True),
         ),
     )
     cmds.button(label="Undo Last (Delete)", command=lambda *_: delete_last_chandelier())
