@@ -83,12 +83,12 @@ def _sanitize_inputs(num_arms, radius, height, tiers, style, extra_lights=0,
         center_lights = 0
     center_lights = max(0, min(12, center_lights))
 
-    # center_height: lift of inner ring above its tier (0..2.0)
+    # center_height: lift of inner ring above its tier (-2..2, negative = lower)
     try:
         center_height = float(center_height)
     except (TypeError, ValueError):
         center_height = 0.35
-    center_height = max(0.0, min(2.0, center_height))
+    center_height = max(-2.0, min(2.0, center_height))
 
     # center_spread: inner ring radius as fraction of outer (0.2..0.8).
     # Larger = wider inner ring = more space between center lights
@@ -321,19 +321,6 @@ def _build_tier(
         cmds.parent(bulb, parent_group)
         parts.append(bulb)
 
-        if is_main:
-            # Joint cube: small decorative cube where arm meets ring
-            joint = _make_part(
-                cmds.polyCube,
-                w=0.22 * tier_scale,
-                h=0.22 * tier_scale,
-                d=0.22 * tier_scale,
-                name="joint_tmp",
-            )
-            cmds.move(x * 0.55, y, z * 0.55, joint)
-            cmds.parent(joint, parent_group)
-            parts.append(joint)
-
     return parts
 
 
@@ -350,7 +337,8 @@ def build_chandelier(
         standing directly on the torus ring / square frame.
     center_lights: 0..12 inner-ring lights per tier hugging the stem,
         each with its own support ring underneath. This is the 'full middle'.
-    center_height: 0..2.0 lift of the inner ring above its tier.
+    center_height: -2..2 lift of the inner ring above its tier.
+        Negative drops it below for a lower center layer.
     center_spread: 0.2..0.8 inner radius as fraction of outer radius.
         Larger spreads lights further apart.
 
@@ -473,7 +461,7 @@ def show_ui():
         "centerSlider", label="Center lights", min=0, max=12, value=6, field=True
     )
     cmds.floatSliderGrp(
-        "centerHeightSlider", label="Center height", min=0.0, max=2.0,
+        "centerHeightSlider", label="Center height", min=-2.0, max=2.0,
         value=0.35, field=True, precision=2
     )
     cmds.floatSliderGrp(
