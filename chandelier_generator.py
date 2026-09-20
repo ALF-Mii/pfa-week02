@@ -34,7 +34,8 @@ def _require_maya():
         raise RuntimeError("This script must run inside Maya (maya.cmds not found).")
 
 
-def _sanitize_inputs(num_arms, radius, height, tiers, style, extra_lights=0):
+def _sanitize_inputs(num_arms, radius, height, tiers, style, extra_lights=0,
+                     center_lights=6):
     """Handle inputs you didn't plan for - on purpose."""
     # num_arms: int 3..12
     try:
@@ -75,7 +76,14 @@ def _sanitize_inputs(num_arms, radius, height, tiers, style, extra_lights=0):
         extra_lights = 0
     extra_lights = max(0, min(3, extra_lights))
 
-    return num_arms, radius, height, tiers, style, extra_lights
+    # center_lights: 0..12 inner-ring lights hugging the stem per tier
+    try:
+        center_lights = int(center_lights)
+    except (TypeError, ValueError):
+        center_lights = 0
+    center_lights = max(0, min(12, center_lights))
+
+    return num_arms, radius, height, tiers, style, extra_lights, center_lights
 
 
 def _unique_name(style):
@@ -113,10 +121,94 @@ def _fixture_position(style, k, total, r):
         return -side / 2, frac * side, 90
 
 
+def _build_center_fill(parent_group, outer_r, y, style, tier_scale, count):
+    """Inner ring of lights around the stem - the 'full middle'.
+
+    Each tier gets a small concentric support ring (torus for round,
+    cube frame for square) with its own dishes/candles/bulbs standing
+    on it, raised slightly so the middle reads as a second layer.
+    Returns list of nodes.
+    """
+    if count <= 0 or outer_r < 0.6:
+        return []
+    inner_r = outer_r * 0.45
+    inner_y = y + 0.35 * tier_scale
+    s = tier_scale * 0.7
+    parts = []
+
+    if style == "round":
+        ring = _make_part(
+            cmds.polyTorus, r=inner_r, sr=0.08 * tier_scale, name="centerRing_tmp"
+        )
+        cmds.move(0, inner_y, 0, ring)
+        cmds.parent(ring, parent_group)
+        parts.append(ring)
+    else:
+        side = inner_r * 1.4
+        beam_h = 0.12
+        for rot_y, pos in [
+            (0, (0, inner_y, side / 2)),
+            (0, (0, inner_y, -side / 2)),
+            (90, (side / 2, inner_y, 0)),
+            (90, (-side / 2, inner_y, 0)),
+        ]:
+            beam = _make_part(
+                cmds.polyCube, w=side, h=beam_h, d=beam_h, name="centerBeam_tmp"
+            )
+            cmds.move(pos[0], pos[1], pos[2], beam)
+            if rot_y:
+                cmds.rotate(0, rot_y, 0, beam)
+            cmds.parent(beam, parent_group)
+            parts.append(beam)
+
+    for k in range(count):
+        x, z, rot_y = _fixture_position(style, k, count, inner_r)
+
+        # Short arm from stem out to the inner ring (so nothing floats)
+        arm_len = math.sqrt(x * x + z * z)
+        if arm_len > 0.01:
+            arm = _make_part(
+                cmds.polyCylinder,
+                r=0.06 * tier_scale,
+                h=arm_len,
+                sz=8,
+                name="centerArm_tmp",
+            )
+            cmds.rotate(0, 0, 90, arm)
+            cmds.rotate(0, rot_y, 0, arm)
+            cmds.move(x / 2.0, inner_y, z / 2.0, arm)
+            cmds.parent(arm, parent_group)
+            parts.append(arm)
+
+        dish = _make_part(
+            cmds.polyCylinder, r=0.22 * s + 0.05, h=0.08, sz=10, name="centerDish_tmp"
+        )
+        cmds.move(x, inner_y + 0.1, z, dish)
+        cmds.parent(dish, parent_group)
+        parts.append(dish)
+
+        candle = _make_part(
+            cmds.polyCylinder, r=0.10 * s + 0.02, h=0.6, sz=8, name="centerCandle_tmp"
+        )
+        cmds.move(x, inner_y + 0.4, z, candle)
+        cmds.parent(candle, parent_group)
+        parts.append(candle)
+
+        bulb = _make_part(
+            cmds.polySphere, r=0.15 * s + 0.03, sx=10, sy=8, name="centerBulb_tmp"
+        )
+        cmds.move(x, inner_y + 0.85, z, bulb)
+        cmds.parent(bulb, parent_group)
+        parts.append(bulb)
+
+    return parts
+
+
 def _build_tier(
-    parent_group, num_arms, radius, y, style, tier_scale=1.0, extra_lights=0
+    parent_group, num_arms, radius, y, style, tier_scale=1.0, extra_lights=0,
+    center_lights=0
 ):
-    """Build one tier of arms + filler lights standing on the support."""
+    """Build one tier: outer arms + inner 'full middle' ring."""
     r = radius * tier_scale
     parts = []
 
@@ -148,6 +240,11 @@ def _build_tier(
                 cmds.rotate(0, rot_y, 0, beam)
             cmds.parent(beam, parent_group)
             parts.append(beam)
+
+    # Middle fullness: inner concentric ring around the stem.
+    parts.extend(
+        _build_center_fill(parent_group, r, y, style, tier_scale, center_lights)
+    )
 
     # Main arms + filler lights share the same support positions.
     # e.g. num_arms=6, extra_lights=1 -> 12 positions, every 2nd is a main arm.
@@ -220,7 +317,8 @@ def _build_tier(
 
 
 def build_chandelier(
-    num_arms=6, radius=5.0, height=8.0, tiers=1, style="round", extra_lights=0
+    num_arms=6, radius=5.0, height=8.0, tiers=1, style="round", extra_lights=0,
+    center_lights=6
 ):
     """
     Build a chandelier from primitives. All geometry is parented under
@@ -229,12 +327,15 @@ def build_chandelier(
     tiers: 1..5 layers, stacked bottom (large) to top (small).
     extra_lights: 0..3 filler candles between each pair of main arms,
         standing directly on the torus ring / square frame.
+    center_lights: 0..12 inner-ring lights per tier hugging the stem,
+        each with its own support ring underneath. This is the 'full middle'.
 
     Returns the group name.
     """
     _require_maya()
-    num_arms, radius, height, tiers, style, extra_lights = _sanitize_inputs(
-        num_arms, radius, height, tiers, style, extra_lights
+    (num_arms, radius, height, tiers,
+     style, extra_lights, center_lights) = _sanitize_inputs(
+        num_arms, radius, height, tiers, style, extra_lights, center_lights
     )
 
     group_name = _unique_name(style)
@@ -285,7 +386,7 @@ def build_chandelier(
 
         for ty, ts in tier_specs:
             _build_tier(grp, num_arms, radius, ty, style, tier_scale=ts,
-                        extra_lights=extra_lights)
+                        extra_lights=extra_lights, center_lights=center_lights)
 
         # Bottom finial: sphere under lowest tier
         finial_y = tier_specs[0][0] - 0.8
@@ -341,6 +442,9 @@ def show_ui():
     cmds.intSliderGrp(
         "extraSlider", label="Extra lights", min=0, max=3, value=0, field=True
     )
+    cmds.intSliderGrp(
+        "centerSlider", label="Center lights", min=0, max=12, value=6, field=True
+    )
     cmds.optionMenuGrp("styleMenu", label="Style")
     cmds.menuItem(label="round")
     cmds.menuItem(label="square")
@@ -353,6 +457,7 @@ def show_ui():
             cmds.intSliderGrp("tiersSlider", q=True, value=True),
             cmds.optionMenuGrp("styleMenu", q=True, value=True),
             cmds.intSliderGrp("extraSlider", q=True, value=True),
+            cmds.intSliderGrp("centerSlider", q=True, value=True),
         ),
     )
     cmds.button(label="Undo Last (Delete)", command=lambda *_: delete_last_chandelier())
