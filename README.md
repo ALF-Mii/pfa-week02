@@ -9,6 +9,10 @@ Chandelier Generator builds parametric placeholder chandeliers for env/lighting 
 
 Ran into an issue with the textures, where the glowing lights wont apply to the correct objects on the chandelier. I tried to fix this with the OpenCode agent but I kept running into the same issue anyways. 
 
+## Video Recording
+
+https://drive.google.com/file/d/13hxqjkrXyUS6oZyGlKJaTIYT9AQoF2MX/view?usp=sharing
+
 ## How to run (Maya 2022+)
 
 1. Put `chandelier_generator.py` anywhere, e.g. `Documents/maya/scripts`.
